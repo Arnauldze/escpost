@@ -17,7 +17,11 @@ function matchPrinter(requested: string, printers: Printer[]): Printer | undefin
 }
 
 /** QZ functions ESCPost does not offer: each one rejects, naming itself. */
-function unsupportedMethods(namespace: string, names: string[]): Record<string, () => Promise<never>> {
+function unsupportedMethods<const Name extends string>(
+  namespace: string,
+  names: readonly Name[],
+): Record<Name, () => Promise<never>> {
+  // The const type parameter keeps each name in the type, so `qz.usb.listDevices` type-checks.
   return Object.fromEntries(
     names.map((name) => [
       name,
@@ -26,7 +30,7 @@ function unsupportedMethods(namespace: string, names: string[]): Record<string, 
           new EscpostError("UNSUPPORTED_FEATURE", `qz.${namespace}.${name}() is a QZ Tray feature that ESCPost does not offer.`),
         ),
     ]),
-  );
+  ) as Record<Name, () => Promise<never>>;
 }
 
 function unknownPrinter(requested: string, printers: Printer[]): EscpostError {
@@ -166,10 +170,10 @@ export function createQzShim(client: EscpostClient = escpost) {
         return Promise.resolve(QZ_VERSION);
       },
       // present and inert. A page calling these before printing must not crash.
-      setPromiseType(): void {},
-      setSha256Type(): void {},
-      setWebSocketType(): void {},
-      showDebug(): void {},
+      setPromiseType(_promiser?: unknown): void {},
+      setSha256Type(_hasher?: unknown): void {},
+      setWebSocketType(_webSocket?: unknown): void {},
+      showDebug(_show?: boolean): void {},
     },
 
     /**
@@ -177,9 +181,9 @@ export function createQzShim(client: EscpostClient = escpost) {
      * nothing — including the certificate handler, whose result is simply discarded.
      */
     security: {
-      setCertificatePromise(): void {},
-      setSignaturePromise(): void {},
-      setSignatureAlgorithm(): void {},
+      setCertificatePromise(_handler?: unknown, _options?: unknown): void {},
+      setSignaturePromise(_factory?: unknown): void {},
+      setSignatureAlgorithm(_algorithm?: string): void {},
     },
 
     printers: {
