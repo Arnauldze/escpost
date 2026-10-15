@@ -51,14 +51,14 @@ describe("jobToBytes", () => {
 
   it("rejects a pixel job and names the supported path", () => {
     expect(() => jobToBytes({ data: [{ type: "pixel", format: "html", flavor: "plain", data: "<h1>x</h1>" }] }))
-      .toThrow(/@escpost\/browser/);
+      .toThrow(/not supported yet/);
     expect(() => jobToBytes({ data: [{ type: "PIXEL", format: "HTML", data: "<h1>x</h1>" }] }))
-      .toThrow(/@escpost\/browser/);
+      .toThrow(/not supported yet/);
   });
 
   it("rejects a raw job whose format still needs rendering", () => {
-    expect(() => jobToBytes({ data: [{ type: "raw", format: "pdf", data: "x.pdf" }] })).toThrow(/@escpost\/browser/);
-    expect(() => jobToBytes({ data: [{ type: "raw", format: "image", data: "x.png" }] })).toThrow(/@escpost\/browser/);
+    expect(() => jobToBytes({ data: [{ type: "raw", format: "pdf", data: "x.pdf" }] })).toThrow(/not supported yet/);
+    expect(() => jobToBytes({ data: [{ type: "raw", format: "image", data: "x.png" }] })).toThrow(/not supported yet/);
   });
 
   it("rejects the file and xml flavors cleanly rather than printing the path", () => {
@@ -72,13 +72,53 @@ describe("jobToBytes", () => {
     );
   });
 
-  it("refuses a character that was never a byte instead of guessing an encoding", () => {
-    expect(() => jobToBytes({ data: ["price: €5"] })).toThrow(/code page/);
+  it("encodes plain text as UTF-8 when no encoding is set, like QZ Tray's default", () => {
+    const bytes = jobToBytes({ data: ["café €"] });
+    expect(Array.from(bytes)).toEqual([0x63, 0x61, 0x66, 0xc3, 0xa9, 0x20, 0xe2, 0x82, 0xac]);
   });
 
-  it("passes Latin-1 code page bytes through untouched", () => {
-    const bytes = jobToBytes({ data: ["café"] });
-    expect(Array.from(bytes)).toEqual([0x63, 0x61, 0x66, 0xe9]);
+  it("encodes plain text with the config's encoding, Java names included", () => {
+    const options = { ...ALL_DEFAULT_OPTIONS, encoding: "IBM00858" };
+    const bytes = jobToBytes({ options, data: ["é€"] });
+    expect(Array.from(bytes)).toEqual([0x82, 0xd5]);
+  });
+
+  it("accepts the other spellings of a DOS code page", () => {
+    for (const encoding of ["Cp858", "cp-858", "IBM858", "858"]) {
+      expect(Array.from(jobToBytes({ options: { encoding }, data: ["€"] }))).toEqual([0xd5]);
+    }
+  });
+
+  it("encodes windows-1252 through the browser's own table", () => {
+    const bytes = jobToBytes({ options: { encoding: "windows-1252" }, data: ["é€"] });
+    expect(Array.from(bytes)).toEqual([0xe9, 0x80]);
+  });
+
+  it("treats ISO-8859-1 as true Latin-1, as Java does", () => {
+    const bytes = jobToBytes({ options: { encoding: "ISO-8859-1" }, data: ["é€"] });
+    expect(Array.from(bytes)).toEqual([0xe9, 0x3f]);
+  });
+
+  it("replaces a character the code page lacks with ?, as Java does", () => {
+    const bytes = jobToBytes({ options: { encoding: "IBM850" }, data: ["€"] });
+    expect(Array.from(bytes)).toEqual([0x3f]);
+  });
+
+  it("refuses an encoding it does not know instead of guessing", () => {
+    expect(() => jobToBytes({ options: { encoding: "x-unknown" }, data: ["a"] })).toThrow(
+      expect.objectContaining({ code: "UNSUPPORTED_FORMAT" }),
+    );
+  });
+
+  it("leaves base64 and hex bytes untouched by a plain encoding", () => {
+    const options = { encoding: "IBM00858" };
+    expect(Array.from(jobToBytes({ options, data: [{ flavor: "base64", data: "6Q==" }] }))).toEqual([0xe9]);
+    expect(Array.from(jobToBytes({ options, data: [{ flavor: "hex", data: "e9" }] }))).toEqual([0xe9]);
+  });
+
+  it("converts base64 bytes with the { from, to } form of the option", () => {
+    const options = { encoding: { from: "windows-1252", to: "IBM00858" } };
+    expect(Array.from(jobToBytes({ options, data: [{ flavor: "base64", data: "6Q==" }] }))).toEqual([0x82]);
   });
 });
 

@@ -1,4 +1,5 @@
 import { EscpostError } from "../errors";
+import { decodeBytes, encodeText, parseEncoding, type QzEncoding } from "./encoding";
 
 /**
  * The version both shims report for `getVersion`.
@@ -11,8 +12,7 @@ import { EscpostError } from "../errors";
 export const QZ_VERSION = "2.2.4";
 
 const USE_BROWSER_PACKAGE =
-  "escpost prints raw ESC/POS only. For HTML or image receipts use @escpost/browser " +
-  "(escpost.print({ printer, html })), which renders server-side.";
+  "ESCPost prints raw ESC/POS only for now. HTML, image and PDF jobs are not supported yet.";
 
 export interface QzPrintElement {
   type?: unknown;
@@ -50,28 +50,7 @@ function assertRaw(element: QzPrintElement): void {
   }
 }
 
-/**
- * A `plain` raw string is a byte string: QZ hands code page bytes straight through
- * as characters 0x00-0xFF. Anything above that was never a byte, and picking an
- * encoding for the caller is how a receipt misprints silently.
- */
-function latin1ToBytes(text: string): Uint8Array {
-  const bytes = new Uint8Array(text.length);
-  for (let index = 0; index < text.length; index++) {
-    const code = text.charCodeAt(index);
-    if (code > 0xff) {
-      throw new EscpostError(
-        "UNSUPPORTED_FORMAT",
-        `The character "${text[index]}" is outside the single-byte range escpost sends as raw data. ` +
-          "Encode the receipt in your printer's code page and send it with the base64 flavor.",
-      );
-    }
-    bytes[index] = code;
-  }
-  return bytes;
-}
-
-function base64ToBytes(text: string): Uint8Array {
+export function base64ToBytes(text: string): Uint8Array {
   let binary: string;
   try {
     binary = atob(text);
@@ -98,7 +77,7 @@ function hexToBytes(text: string): Uint8Array {
   return bytes;
 }
 
-function elementToBytes(element: QzPrintElement): Uint8Array {
+function elementToBytes(element: QzPrintElement, encoding: QzEncoding): Uint8Array {
   assertRaw(element);
 
   const flavor = String(element.flavor ?? "plain").toLowerCase();
@@ -117,14 +96,24 @@ function elementToBytes(element: QzPrintElement): Uint8Array {
 
   switch (flavor) {
     case "plain":
-      return latin1ToBytes(data);
+      // QZ Tray encodes plain text with the config's encoding (see encoding.ts).
+      return encodeText(data, encoding.to);
     case "base64":
-      return base64ToBytes(data);
+      return convert(base64ToBytes(data), encoding);
     case "hex":
-      return hexToBytes(data);
+      return convert(hexToBytes(data), encoding);
     default:
       throw new EscpostError("UNSUPPORTED_FORMAT", `escpost does not know the raw flavor "${flavor}".`);
   }
+}
+
+/**
+ * Bytes are sent as they are, unless the option is `{ from, to }`: then QZ Tray
+ * re-encodes them from one charset to the other, and so do we.
+ */
+function convert(bytes: Uint8Array, encoding: QzEncoding): Uint8Array {
+  if (!encoding.from) return bytes;
+  return encodeText(decodeBytes(bytes, encoding.from), encoding.to);
 }
 
 function concat(chunks: Uint8Array[]): Uint8Array {
@@ -141,14 +130,15 @@ function concat(chunks: Uint8Array[]): Uint8Array {
 /** Turn one QZ `print` params object into the exact bytes to hand the daemon. */
 export function jobToBytes(params: QzPrintParams): Uint8Array {
   const elements = Array.isArray(params.data) ? (params.data as unknown[]) : [];
+  const encoding = parseEncoding(params.options?.["encoding"]);
 
   const chunks = elements.map((element) =>
     // qz-tray.js does NOT expand a bare string client-side: both `_qz.tools.relative`
     // and `_qz.compatible.data` test `constructor === Object` and skip everything else.
     // The server has always done that expansion, so now we do.
     typeof element === "string"
-      ? elementToBytes({ type: "raw", format: "command", flavor: "plain", data: element })
-      : elementToBytes((element ?? {}) as QzPrintElement),
+      ? elementToBytes({ type: "raw", format: "command", flavor: "plain", data: element }, encoding)
+      : elementToBytes((element ?? {}) as QzPrintElement, encoding),
   );
 
   // `options` arrives with every default key set, so a present value proves nothing
