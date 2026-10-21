@@ -151,8 +151,9 @@ async function imageToCanvas(job: QzPrintElement, width: number): Promise<HTMLCa
  *
  * The HTML is first laid out in a hidden sandboxed iframe (no scripts) at the
  * target width, to learn its height and to get it as XHTML, which SVG needs.
- * An SVG drawn as an image may not download anything, so `<img>` files are
- * embedded first (see `inlineImages`). Fonts and CSS from other files are not.
+ * An SVG drawn as an image may not download anything, so `<img>` files, style
+ * sheets and the fonts and images they use are embedded first (see
+ * `inlineImages` and `inlineStyles`).
  *
  * With QZ's `scaleContent` option (on by default), content wider than the
  * paper, such as a large image, is shrunk to fit instead of being cut off.
@@ -181,7 +182,9 @@ async function htmlToCanvas(
     await loaded;
     const frameDocument = frame.contentDocument;
     if (frameDocument === null) throw new EscpostError("PRINT_FAILED", "The HTML could not be laid out.");
-    await inlineImages(frameDocument);
+    await Promise.all([inlineImages(frameDocument), inlineStyles(frameDocument)]);
+    // A font changes the text's size, so measure only once the fonts are in.
+    await frameDocument.fonts.ready;
     const root = frameDocument.documentElement;
     const contentWidth = scaleContent ? Math.max(layoutWidth, Math.ceil(root.scrollWidth)) : layoutWidth;
     const layoutHeight = Math.ceil(root.scrollHeight);
@@ -218,18 +221,97 @@ async function inlineImages(frameDocument: Document): Promise<void> {
     Array.from(frameDocument.images).map(async (image) => {
       const source = image.getAttribute("src");
       if (!source || source.startsWith("data:")) return;
-      try {
-        const response = await fetch(new URL(source, frameDocument.baseURI));
-        if (!response.ok) return;
-        const dataUrl = await blobToDataUrl(await response.blob());
-        image.removeAttribute("srcset");
-        image.setAttribute("src", dataUrl);
-        await image.decode();
-      } catch {
-        // Not downloadable (often CORS): leave it blank rather than fail the receipt.
-      }
+      const dataUrl = await fetchDataUrl(new URL(source, frameDocument.baseURI));
+      if (dataUrl === undefined) return;
+      image.removeAttribute("srcset");
+      image.setAttribute("src", dataUrl);
+      await image.decode().catch(() => {});
     }),
   );
+}
+
+/**
+ * The same for CSS: each `<link rel="stylesheet">` becomes a `<style>` holding
+ * the file's text, and the files the CSS points to (fonts, background images,
+ * `@import`ed sheets) become `data:` URLs. Same rule as images: a file the page
+ * may not download is skipped, and the receipt prints without it.
+ */
+async function inlineStyles(frameDocument: Document): Promise<void> {
+  const base = frameDocument.baseURI;
+  const links = Array.from(frameDocument.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet" i][href]'));
+  const styles = Array.from(frameDocument.querySelectorAll("style"));
+  const styled = Array.from(frameDocument.querySelectorAll<HTMLElement>('[style*="url("]'));
+
+  await Promise.all([
+    ...links.map(async (link) => {
+      const css = await fetchCss(new URL(link.getAttribute("href")!, base), 0);
+      if (css === undefined) return;
+      const style = frameDocument.createElement("style");
+      const media = link.getAttribute("media");
+      if (media) style.setAttribute("media", media);
+      style.textContent = css;
+      link.replaceWith(style);
+    }),
+    ...styles.map(async (style) => {
+      style.textContent = await inlineCssUrls(style.textContent ?? "", base);
+    }),
+    ...styled.map(async (element) => {
+      element.setAttribute("style", await inlineCssUrls(element.getAttribute("style")!, base));
+    }),
+  ]);
+}
+
+const CSS_IMPORT = /@import\s+(?:url\(\s*)?(["']?)([^"')\s;]+)\1\s*\)?[^;]*;/g;
+const CSS_URL = /url\(\s*(["']?)([^"')]+)\1\s*\)/g;
+/** How deep `@import` chains are followed: enough for real sheets, safe from loops. */
+const MAX_IMPORT_DEPTH = 3;
+
+async function fetchCss(url: URL, depth: number): Promise<string | undefined> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return undefined;
+    // The sheet's own urls are relative to the sheet, not to the page.
+    return await inlineCssUrls(await response.text(), url, depth);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Replace a sheet's `@import`s and `url()`s by the files themselves. */
+export async function inlineCssUrls(css: string, base: string | URL, depth = 0): Promise<string> {
+  const imported =
+    depth < MAX_IMPORT_DEPTH
+      ? await replaceAsync(css, CSS_IMPORT, async (rule, _quote, href) => (await fetchCss(new URL(href!, base), depth + 1)) ?? rule)
+      : css;
+  return replaceAsync(imported, CSS_URL, async (match, _quote, href) => {
+    // data: is already inline, and "#id" points into the page (SVG filters).
+    if (href!.startsWith("data:") || href!.startsWith("#")) return match;
+    const dataUrl = await fetchDataUrl(new URL(href!, base));
+    return dataUrl === undefined ? match : `url("${dataUrl}")`;
+  });
+}
+
+/** `String.replace` with an async replacer: the downloads run in parallel. */
+async function replaceAsync(
+  text: string,
+  pattern: RegExp,
+  replacer: (match: string, ...groups: Array<string | undefined>) => Promise<string>,
+): Promise<string> {
+  const matches = Array.from(text.matchAll(pattern));
+  const replacements = await Promise.all(matches.map((match) => replacer(match[0], ...match.slice(1))));
+  let index = 0;
+  return text.replace(pattern, () => replacements[index++]!);
+}
+
+/** A file as a `data:` URL, or undefined when the page may not download it (often CORS). */
+async function fetchDataUrl(url: URL): Promise<string | undefined> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return undefined;
+    return await blobToDataUrl(await response.blob());
+  } catch {
+    return undefined;
+  }
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
