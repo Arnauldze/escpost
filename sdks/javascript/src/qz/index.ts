@@ -2,16 +2,16 @@
  * A drop-in replacement for `qz-tray.js`.
  *
  * Swap the script tag, or the import specifier, and a page keeps its existing
- * `qz.*` call sites. Printing goes through the escpost extension rather than a
+ * `qz.*` call sites. Printing goes through the ESCPost extension rather than a
  * QZ Tray install, so there is no certificate and no dialog per print.
  *
- * Raw ESC/POS only. An HTML or image job is refused with a pointer to
- * `escpost.print({ printer, html })`, which renders server side.
+ * Raw jobs are sent as they are. Image, HTML and PDF jobs are drawn in the
+ * page and sent as an ESC/POS raster image (see render.ts).
  *
  * Both ways of arriving here work, because both are how qz-tray is used:
  *
- *     import qz from "@escpost/browser/qz";   // the default export
- *     <script src="escpost-qz.js"></script>   // installs window.qz
+ *     import qz from "@receiptful.io/escpost/qz";   // the default export
+ *     <script src="escpost-qz.js"></script>         // installs window.qz (script.ts)
  *
  * The npm package publishes a UMD file with no `module`, `exports` or `types`
  * field, so its consumers write `require("qz-tray")` or `import qz from

@@ -107,6 +107,34 @@ const result = await escpost.print({ printer: "counter", data: receiptBytes });
 console.log(result.jobId);
 ```
 
+## Migrate from QZ Tray
+
+The package includes a QZ Tray compatibility shim: a `qz` object with the same
+API as QZ Tray's `qz-tray.js`, which prints through ESCPost instead. A page keeps
+its `qz.*` calls and only changes where `qz` comes from:
+
+```ts
+// before: import qz from "qz-tray";
+import qz from "@receiptful.io/escpost/qz";
+```
+
+A page that loads `qz-tray.js` with a script tag loads `escpost-qz.js` instead,
+which defines `window.qz`:
+
+```html
+<!-- before: <script src="qz-tray.js"></script> -->
+<script src="escpost-qz.js"></script>
+```
+
+`escpost-qz.js` is published in the package's `dist/` folder.
+
+`qz.security` calls are accepted and ignored, so no certificate is needed and no
+popup appears. Raw jobs are sent as they are, with plain text encoded in the
+config's `encoding`, as QZ Tray does. Image, HTML and PDF jobs are drawn in the
+browser and printed as an ESC/POS image. QZ Tray features that ESCPost does not
+offer (`qz.serial`, `qz.usb`, `qz.hid`, `qz.file`, `qz.socket` and printer
+status) reject with `UNSUPPORTED_FEATURE`.
+
 ## Errors
 
 Operations may reject with `EscpostError`, whose `code` identifies the failure:
@@ -119,6 +147,8 @@ Operations may reject with `EscpostError`, whose `code` identifies the failure:
 | `PRINTER_NOT_FOUND` | No configured printer has the requested exact name. |
 | `PRINT_FAILED` | The daemon could not complete the raw print job. |
 | `PROTOCOL_MISMATCH` | A response did not match the SDK protocol. |
+| `UNSUPPORTED_FORMAT` | The QZ shim cannot print this kind of data. |
+| `UNSUPPORTED_FEATURE` | The QZ shim was asked for a QZ Tray feature that ESCPost does not offer. |
 
 ```ts
 import { EscpostError, escpost } from "@receiptful.io/escpost";

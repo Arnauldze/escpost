@@ -3,9 +3,10 @@ import { defineConfig } from "vite";
 export default defineConfig({
   build: {
     lib: {
-      entry: "src/index.ts",
+      // Two entries, one per package export: "." and "./qz".
+      entry: { index: "src/index.ts", qz: "src/qz/index.ts" },
       formats: ["es"],
-      fileName: "index",
+      fileName: (_format, entryName) => `${entryName}.js`,
     },
     minify: false,
   },
