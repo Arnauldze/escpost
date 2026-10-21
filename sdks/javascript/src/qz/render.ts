@@ -1,5 +1,6 @@
 import { EscpostError } from "../errors";
 import { base64ToBytes, bytesToBase64, type QzPrintElement } from "./jobs";
+import { importPdfJs } from "./pdfjs";
 
 /**
  * Turns the QZ jobs that need rendering (images, HTML, PDF, and the `file`
@@ -18,8 +19,6 @@ const PRINTER_DPI = 203;
 const CSS_DPI = 96;
 /** Rows per `GS v 0` command; small bands keep cheap printers' buffers safe. */
 const BAND_HEIGHT = 256;
-/** Pinned pdf.js release, loaded from the CDN only when a PDF is printed. */
-const PDFJS_BASE = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/";
 
 const ESC_INIT = [0x1b, 0x40];
 const FEED_AND_CUT = [0x0a, 0x0a, 0x0a, 0x1d, 0x56, 0x41, 0x00];
@@ -243,7 +242,6 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 type PdfJs = {
-  GlobalWorkerOptions: { workerSrc: string };
   getDocument(source: { data: Uint8Array }): {
     promise: Promise<{
       numPages: number;
@@ -257,14 +255,21 @@ type PdfJs = {
 
 let pdfJs: Promise<PdfJs> | undefined;
 
-/** pdf.js is about 1.7 MB, so it is fetched only for the first PDF, never bundled. */
+/** pdf.js is about 1.7 MB, so it is loaded only for the first PDF (see pdfjs.ts). */
 function loadPdfJs(): Promise<PdfJs> {
-  pdfJs ??= (async () => {
-    const url = `${PDFJS_BASE}pdf.min.mjs`;
-    const module = (await import(/* @vite-ignore */ url)) as PdfJs;
-    module.GlobalWorkerOptions.workerSrc = `${PDFJS_BASE}pdf.worker.min.mjs`;
-    return module;
-  })();
+  if (pdfJs === undefined) {
+    pdfJs = (async () => {
+      const [library, worker] = await importPdfJs();
+      // pdf.js runs its worker code in the page when it finds it here, so it
+      // never has to locate pdf.worker.min.js by URL, which bundlers move around.
+      (globalThis as { pdfjsWorker?: unknown }).pdfjsWorker = worker;
+      return library as PdfJs;
+    })();
+    // A failed download (missing file) must not block every later try.
+    pdfJs.catch(() => {
+      pdfJs = undefined;
+    });
+  }
   return pdfJs;
 }
 

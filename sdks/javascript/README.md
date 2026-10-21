@@ -126,7 +126,10 @@ which defines `window.qz`:
 <script src="escpost-qz.js"></script>
 ```
 
-`escpost-qz.js` is published in the package's `dist/` folder.
+`escpost-qz.js` is published in the package's `dist/` folder. To print PDFs,
+also serve the `dist/pdfjs/` folder next to it: the shim loads pdf.js from
+there on the first PDF. pdf.js ships in the package, so PDF printing works
+offline, and a page that prints no PDF never downloads it.
 
 `qz.security` calls are accepted and ignored, so no certificate is needed and no
 popup appears. Raw jobs are sent as they are, with plain text encoded in the

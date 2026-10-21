@@ -43,6 +43,7 @@
   },
   "devDependencies": {
     "happy-dom": "20.0.0",
+    "pdfjs-dist": "4.10.38",
     "typescript": "5.9.2",
     "vite": "7.3.6",
     "vitest": "3.2.4"
