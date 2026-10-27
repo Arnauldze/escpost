@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { escAsterisk, gsL, gsV0, qzImageOptions, qzImageToEscpos, quantize } from "../src/qz/escpos-image";
+import { escAsterisk, gsL, gsV0, horizontalStretch, qzImageOptions, qzImageToEscpos, quantize } from "../src/qz/escpos-image";
 
 const BLACK = [0, 0, 0, 255];
 const WHITE = [255, 255, 255, 255];
@@ -85,5 +85,18 @@ describe("QZ Tray's ESC/POS image commands", () => {
     const options = qzImageOptions({ dotDensity: "double" })!;
     const bytes = qzImageToEscpos(pixels(["#########"]), 9, 1, options, neverDither);
     expect(Array.from(bytes.slice(0, 5))).toEqual([0x1b, 0x2a, 33, 16, 0]);
+  });
+});
+
+describe("horizontalStretch", () => {
+  it("is 2 for ESC * single densities, which print every column two dots wide", () => {
+    expect(horizontalStretch(qzImageOptions({ dotDensity: "single" })!)).toBe(2);
+    expect(horizontalStretch(qzImageOptions({ dotDensity: "single-legacy" })!)).toBe(2);
+    expect(horizontalStretch(qzImageOptions({ dotDensity: "0" })!)).toBe(2);
+  });
+
+  it("is 1 for double density and for the raster commands", () => {
+    expect(horizontalStretch(qzImageOptions({ dotDensity: "double" })!)).toBe(1);
+    expect(horizontalStretch(qzImageOptions({ dotDensity: "single", imageEncoding: "gs_v_0" })!)).toBe(1);
   });
 });

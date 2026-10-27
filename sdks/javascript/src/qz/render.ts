@@ -1,6 +1,6 @@
 import { EscpostError } from "../errors";
 import { base64ToBytes, bytesToBase64, type QzPrintElement } from "./jobs";
-import { qzImageOptions, qzImageToEscpos } from "./escpos-image";
+import { horizontalStretch, qzImageOptions, qzImageToEscpos } from "./escpos-image";
 import { importPdfJs } from "./pdfjs";
 
 /**
@@ -13,8 +13,10 @@ import { importPdfJs } from "./pdfjs";
  * in the browser. That only suits ESC/POS printers, which is ESCPost's target.
  */
 
-/** Width of an 80 mm roll at 203 dpi: the default when the job gives none. */
+/** Printable width of an 80 mm roll at 203 dpi (72 mm): the default when the job gives no paper size. */
 const DEFAULT_WIDTH_DOTS = 576;
+/** Printable width of a 58 mm roll at 203 dpi (48 mm). */
+const NARROW_WIDTH_DOTS = 384;
 const PRINTER_DPI = 203;
 /** CSS defines 96 px per inch, so a pixel job's HTML keeps its real-world size. */
 const CSS_DPI = 96;
@@ -59,10 +61,13 @@ async function renderElement(element: unknown, configOptions: Options): Promise<
   if (type !== "raw" && type !== "pixel") return element;
 
   const options = (job.options ?? {}) as Options;
-  const width = targetWidth(type, options, configOptions);
   const scaleContent = configOptions["scaleContent"] !== false;
   // A raw job that sets QZ's image options gets QZ's own encoding (escpos-image.ts).
   const qzImage = type === "raw" ? qzImageOptions(options) : undefined;
+  // `ESC *` single density prints every column two dots wide, so the picture
+  // is drawn half as wide: once stretched, it still fits the printable width.
+  const stretch = qzImage === undefined ? 1 : horizontalStretch(qzImage);
+  const width = Math.floor(targetWidth(type, options, configOptions) / stretch);
   const canvases =
     format === "image"
       ? [await imageToCanvas(job, width, type === "pixel" && scaleContent, qzImage !== undefined)]
@@ -88,20 +93,40 @@ function rawElement(bytes: Uint8Array): QzPrintElement {
 }
 
 /**
- * Raw jobs give `pageWidth` in dots. Pixel jobs give it, or the config's
- * `size.width`, in the config's units, which we convert at the printer's 203 dpi.
- * Anything wider than the roll is shrunk to it.
+ * The width to draw at, never wider than the printable width (see
+ * `printableWidth`). Raw jobs may give `pageWidth` in dots; pixel jobs may give
+ * it in the config's units, converted at the printer's 203 dpi. Without one,
+ * the job fills the printable width.
  */
 function targetWidth(type: string, options: Options, configOptions: Options): number {
-  if (type === "raw") return positive(options["pageWidth"]) ?? DEFAULT_WIDTH_DOTS;
+  const printable = printableWidth(configOptions);
+  const pageWidth = positive(options["pageWidth"]);
+  if (pageWidth === undefined) return printable;
+  const dots = type === "raw" ? pageWidth : Math.round(toMillimetres(pageWidth, configOptions) * (PRINTER_DPI / 25.4));
+  return Math.min(printable, dots);
+}
 
-  const units = String(configOptions["units"] ?? "in").toLowerCase();
+/**
+ * The width the print head can actually print, in dots. ESC/POS heads leave
+ * margins: 80 mm paper prints 72 mm (576 dots) and 58 mm paper prints 48 mm
+ * (384 dots). A page that says its paper size (QZ's `size`) gets the matching
+ * width; any other paper loses 8 mm. With no size, the paper is taken to be
+ * 80 mm, the usual receipt roll.
+ */
+export function printableWidth(configOptions: Options): number {
   const size = configOptions["size"] as { width?: unknown } | null | undefined;
-  const width = positive(options["pageWidth"]) ?? positive(size?.width);
-  if (width === undefined) return DEFAULT_WIDTH_DOTS;
+  const paper = positive(size?.width);
+  if (paper === undefined) return DEFAULT_WIDTH_DOTS;
 
-  const inches = units === "mm" ? width / 25.4 : units === "cm" ? width / 2.54 : width;
-  return Math.min(DEFAULT_WIDTH_DOTS, Math.round(inches * PRINTER_DPI));
+  const millimetres = toMillimetres(paper, configOptions);
+  if (millimetres <= 60) return NARROW_WIDTH_DOTS;
+  if (millimetres <= 82) return DEFAULT_WIDTH_DOTS;
+  return Math.round(((millimetres - 8) * PRINTER_DPI) / 25.4);
+}
+
+function toMillimetres(value: number, configOptions: Options): number {
+  const units = String(configOptions["units"] ?? "in").toLowerCase();
+  return units === "mm" ? value : units === "cm" ? value * 10 : value * 25.4;
 }
 
 /**
@@ -183,6 +208,8 @@ async function imageToCanvas(job: QzPrintElement, width: number, fill: boolean, 
   const drawWidth = fill ? width : Math.min(width, bitmap.width);
   const height = Math.round((bitmap.height * drawWidth) / bitmap.width);
   const { canvas, context } = whiteCanvas(drawWidth, height, transparent);
+  // Resized images keep thin lines and text edges instead of dropping pixels.
+  context.imageSmoothingQuality = "high";
   context.drawImage(bitmap, 0, 0, drawWidth, height);
   bitmap.close();
   return canvas;

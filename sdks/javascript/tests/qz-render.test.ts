@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rasterToEscpos } from "../src/qz/render";
+import { printableWidth, rasterToEscpos } from "../src/qz/render";
 
 /** RGBA pixels from rows of "#" (black) and "." (white). */
 function pixels(rows: string[]): Uint8ClampedArray {
@@ -56,5 +56,20 @@ describe("rasterToEscpos", () => {
     const second = 8 + 256;
     expect(Array.from(bytes.slice(second, second + 8))).toEqual([0x1d, 0x76, 0x30, 0x00, 1, 0, 44, 0]);
     expect(bytes.length).toBe(8 + 256 + 8 + 44);
+  });
+});
+
+describe("printableWidth", () => {
+  it("is 72 mm (576 dots) when the page gives no paper size, the usual 80 mm roll", () => {
+    expect(printableWidth({})).toBe(576);
+    expect(printableWidth({ size: null })).toBe(576);
+  });
+
+  it("follows the paper size the page gives, minus the print head's margins", () => {
+    expect(printableWidth({ size: { width: 58 }, units: "mm" })).toBe(384);
+    expect(printableWidth({ size: { width: 2.25 } })).toBe(384); // inches, QZ's default unit
+    expect(printableWidth({ size: { width: 8 }, units: "cm" })).toBe(576);
+    expect(printableWidth({ size: { width: 3.15 } })).toBe(576);
+    expect(printableWidth({ size: { width: 104 }, units: "mm" })).toBe(767); // 96 mm printable
   });
 });

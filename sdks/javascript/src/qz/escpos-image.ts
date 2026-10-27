@@ -49,6 +49,15 @@ export function qzImageOptions(options: Record<string, unknown>): QzImageOptions
   };
 }
 
+/**
+ * How many dots wide each image column prints. `ESC *` single densities (m = 0
+ * and 32) halve the horizontal resolution, so every column prints two dots
+ * wide: that is why QZ Tray's default raw image comes out twice as wide.
+ */
+export function horizontalStretch(options: QzImageOptions): number {
+  return options.encoding === "esc_asterisk" && (options.dotDensity === 0 || options.dotDensity === 32) ? 2 : 1;
+}
+
 /** QZ Tray's names for `ESC *` densities; negative means legacy mode. */
 function parseDotDensity(value: unknown): number {
   const text = String(value ?? "").trim().toLowerCase();
