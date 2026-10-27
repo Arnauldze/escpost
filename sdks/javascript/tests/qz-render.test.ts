@@ -26,12 +26,20 @@ describe("rasterToEscpos", () => {
     expect(Array.from(bytes)).toEqual([0x1d, 0x76, 0x30, 0x00, 2, 0, 1, 0, 0xff, 0x80]);
   });
 
-  it("dithers a mid-grey area into about half black dots instead of all white", () => {
+  it("dithers a mid-grey area into a bit less than half black dots, to make up for dot gain", () => {
     const size = 32;
     const bytes = rasterToEscpos(new Uint8ClampedArray(size * size * 4).fill(128), size, size);
     const ones = Array.from(bytes.slice(8)).reduce((sum, byte) => sum + countBits(byte), 0);
-    expect(ones / (size * size)).toBeGreaterThan(0.4);
-    expect(ones / (size * size)).toBeLessThan(0.6);
+    // Grey 128 is lightened to about 147 before dithering: about 42% black dots, not 50%.
+    expect(ones / (size * size)).toBeGreaterThan(0.37);
+    expect(ones / (size * size)).toBeLessThan(0.47);
+  });
+
+  it("leaves pure black and pure white exactly as they are", () => {
+    const black = rasterToEscpos(pixels(["########", "########"]), 8, 2);
+    const white = rasterToEscpos(pixels(["........", "........"]), 8, 2);
+    expect(Array.from(black.slice(8))).toEqual([0xff, 0xff]);
+    expect(Array.from(white.slice(8))).toEqual([0x00, 0x00]);
   });
 
   it("keeps a light grey line visible as sparse dots, where a plain threshold printed nothing", () => {

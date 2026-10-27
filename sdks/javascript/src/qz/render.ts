@@ -1,5 +1,6 @@
 import { EscpostError } from "../errors";
 import { base64ToBytes, bytesToBase64, type QzPrintElement } from "./jobs";
+import { qzImageOptions, qzImageToEscpos } from "./escpos-image";
 import { importPdfJs } from "./pdfjs";
 
 /**
@@ -17,8 +18,19 @@ const DEFAULT_WIDTH_DOTS = 576;
 const PRINTER_DPI = 203;
 /** CSS defines 96 px per inch, so a pixel job's HTML keeps its real-world size. */
 const CSS_DPI = 96;
+/** PDF sizes are in points, 72 per inch. */
+const PDF_DPI = 72;
+/** QZ Tray's density for ESC/POS when the config sets none: raw HTML is laid out for it. */
+const QZ_ESCPOS_DENSITY = 180;
 /** Rows per `GS v 0` command; small bands keep cheap printers' buffers safe. */
 const BAND_HEIGHT = 256;
+/**
+ * A thermal dot spreads a little on the paper ("dot gain"), so a dithered grey
+ * prints darker than it should. Greys are lightened by this gamma before
+ * dithering to make up for it; black and white are left exactly as they are.
+ * 1 turns the correction off. Tuned by printing a grey ramp (see the PR).
+ */
+const DOT_GAIN_GAMMA = 0.8;
 
 const ESC_INIT = [0x1b, 0x40];
 const FEED_AND_CUT = [0x0a, 0x0a, 0x0a, 0x1d, 0x56, 0x41, 0x00];
@@ -48,14 +60,24 @@ async function renderElement(element: unknown, configOptions: Options): Promise<
 
   const options = (job.options ?? {}) as Options;
   const width = targetWidth(type, options, configOptions);
+  const scaleContent = configOptions["scaleContent"] !== false;
+  // A raw job that sets QZ's image options gets QZ's own encoding (escpos-image.ts).
+  const qzImage = type === "raw" ? qzImageOptions(options) : undefined;
   const canvases =
     format === "image"
-      ? [await imageToCanvas(job, width)]
+      ? [await imageToCanvas(job, width, type === "pixel" && scaleContent, qzImage !== undefined)]
       : format === "html"
-        ? [await htmlToCanvas(job, width, type === "pixel" ? PRINTER_DPI / CSS_DPI : 1, configOptions["scaleContent"] !== false)]
-        : await pdfToCanvases(job, width);
+        ? [await htmlToCanvas(job, width, type === "pixel" ? PRINTER_DPI / CSS_DPI : rawDotsPerPixel(configOptions), scaleContent)]
+        : await pdfToCanvases(job, width, type === "raw" || scaleContent);
 
-  const commands = canvases.flatMap((canvas) => Array.from(canvasToRaster(canvas)));
+  const commands = canvases.flatMap((canvas) => {
+    const { data } = canvas.getContext("2d", { willReadFrequently: true })!.getImageData(0, 0, canvas.width, canvas.height);
+    const bytes =
+      qzImage === undefined
+        ? rasterToEscpos(data, canvas.width, canvas.height)
+        : qzImageToEscpos(data, canvas.width, canvas.height, qzImage, ditherToBlack);
+    return Array.from(bytes);
+  });
   // A pixel job is a whole document, which a driver would start and cut.
   const bytes = type === "pixel" ? [...ESC_INIT, ...commands, ...FEED_AND_CUT] : commands;
   return rawElement(Uint8Array.from(bytes));
@@ -80,6 +102,19 @@ function targetWidth(type: string, options: Options, configOptions: Options): nu
 
   const inches = units === "mm" ? width / 25.4 : units === "cm" ? width / 2.54 : width;
   return Math.min(DEFAULT_WIDTH_DOTS, Math.round(inches * PRINTER_DPI));
+}
+
+/**
+ * Dots per CSS pixel for raw HTML. QZ Tray lays it out at 96 CSS px per inch of
+ * the config's density, or of 180 dpi for ESC/POS when there is none, and
+ * prints that at one dot per density pixel: 180 / 96 = 1.875 dots per CSS px.
+ */
+function rawDotsPerPixel(configOptions: Options): number {
+  const density = Number(configOptions["density"]);
+  const units = String(configOptions["units"] ?? "in").toLowerCase();
+  const perInch = units === "mm" ? 25.4 : units === "cm" ? 2.54 : 1;
+  const dpi = Number.isFinite(density) && density * perInch > 1 ? density * perInch : QZ_ESCPOS_DENSITY;
+  return dpi / CSS_DPI;
 }
 
 function positive(value: unknown): number | undefined {
@@ -111,20 +146,33 @@ async function fetchBytes(url: unknown): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-function whiteCanvas(width: number, height: number): { canvas: HTMLCanvasElement; context: CanvasRenderingContext2D } {
+function whiteCanvas(
+  width: number,
+  height: number,
+  transparent = false,
+): { canvas: HTMLCanvasElement; context: CanvasRenderingContext2D } {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = Math.max(1, height);
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (context === null) throw new EscpostError("PRINT_FAILED", "This browser cannot draw on a canvas.");
-  // Transparent pixels must print as paper, not ink.
-  context.fillStyle = "#fff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
+  // Transparent pixels must print as paper, not ink. QZ's own image rules read
+  // the transparency themselves, so they get the pixels as they are.
+  if (!transparent) {
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }
   return { canvas, context };
 }
 
-/** Draw the image at the target width, keeping its proportions. */
-async function imageToCanvas(job: QzPrintElement, width: number): Promise<HTMLCanvasElement> {
+/**
+ * Draw the image keeping its proportions. `fill` is QZ's `scaleContent` for a
+ * pixel image: QZ Tray stretches it, up or down, to the page width, so it fills
+ * the printable width here. Otherwise one image pixel is one dot, as QZ Tray
+ * prints at the printer's density, and only an image wider than the paper is
+ * shrunk to fit.
+ */
+async function imageToCanvas(job: QzPrintElement, width: number, fill: boolean, transparent: boolean): Promise<HTMLCanvasElement> {
   const bytes = await contentBytes(job);
   let bitmap: ImageBitmap;
   try {
@@ -132,9 +180,9 @@ async function imageToCanvas(job: QzPrintElement, width: number): Promise<HTMLCa
   } catch {
     throw new EscpostError("UNSUPPORTED_FORMAT", "The image could not be decoded (PNG, JPEG, GIF, WebP or BMP expected).");
   }
-  const drawWidth = Math.min(width, bitmap.width);
+  const drawWidth = fill ? width : Math.min(width, bitmap.width);
   const height = Math.round((bitmap.height * drawWidth) / bitmap.width);
-  const { canvas, context } = whiteCanvas(drawWidth, height);
+  const { canvas, context } = whiteCanvas(drawWidth, height, transparent);
   context.drawImage(bitmap, 0, 0, drawWidth, height);
   bitmap.close();
   return canvas;
@@ -143,11 +191,11 @@ async function imageToCanvas(job: QzPrintElement, width: number): Promise<HTMLCa
 /**
  * Render HTML through an SVG `foreignObject`, the browser's own layout engine.
  *
- * `dotsPerPixel` is 1 for a raw job, whose width is given in dots: one CSS
- * pixel prints as one dot, as in QZ Tray. A pixel job is a document, so its
- * CSS sizes are honoured instead: it is laid out at the paper width in CSS
- * pixels (96 per inch), then drawn enlarged to the printer's 203 dpi, so 12 px
- * text prints about 3 mm tall.
+ * `dotsPerPixel` sets the size. A pixel job is a document, so its CSS sizes
+ * are honoured: it is laid out at the paper width in CSS pixels (96 per inch),
+ * then drawn enlarged to the printer's 203 dpi, so 12 px text prints about
+ * 3 mm tall, as with QZ Tray. A raw job uses QZ Tray's raw density instead
+ * (see `rawDotsPerPixel`).
  *
  * The HTML is first laid out in a hidden sandboxed iframe (no scripts) at the
  * target width, to learn its height and to get it as XHTML, which SVG needs.
@@ -355,8 +403,12 @@ function loadPdfJs(): Promise<PdfJs> {
   return pdfJs;
 }
 
-/** One canvas per page, each scaled to the target width. */
-async function pdfToCanvases(job: QzPrintElement, width: number): Promise<HTMLCanvasElement[]> {
+/**
+ * One canvas per page. `fit` scales each page to the target width, as QZ's
+ * `scaleContent` and raw `pageWidth` do. Without it a page keeps its real size
+ * (72 points per inch at the printer's 203 dpi), shrunk only if wider than the paper.
+ */
+async function pdfToCanvases(job: QzPrintElement, width: number, fit: boolean): Promise<HTMLCanvasElement[]> {
   const bytes = await contentBytes(job);
   let pdf: Awaited<ReturnType<PdfJs["getDocument"]>["promise"]>;
   try {
@@ -368,19 +420,14 @@ async function pdfToCanvases(job: QzPrintElement, width: number): Promise<HTMLCa
   const canvases: HTMLCanvasElement[] = [];
   for (let number = 1; number <= pdf.numPages; number++) {
     const page = await pdf.getPage(number);
-    const scale = width / page.getViewport({ scale: 1 }).width;
+    const pageWidth = page.getViewport({ scale: 1 }).width;
+    const scale = fit ? width / pageWidth : Math.min(width / pageWidth, PRINTER_DPI / PDF_DPI);
     const viewport = page.getViewport({ scale });
     const { canvas, context } = whiteCanvas(Math.round(viewport.width), Math.round(viewport.height));
     await page.render({ canvasContext: context, viewport }).promise;
     canvases.push(canvas);
   }
   return canvases;
-}
-
-function canvasToRaster(canvas: HTMLCanvasElement): Uint8Array {
-  const context = canvas.getContext("2d", { willReadFrequently: true })!;
-  const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
-  return rasterToEscpos(data, canvas.width, canvas.height);
 }
 
 /**
@@ -414,12 +461,16 @@ export function rasterToEscpos(rgba: ArrayLike<number>, width: number, height: n
   return Uint8Array.from(out);
 }
 
-/** One entry per pixel, 1 for a black dot, using Floyd-Steinberg error diffusion. */
+/**
+ * One entry per pixel, 1 for a black dot, using Floyd-Steinberg error diffusion
+ * on greys lightened for dot gain (see `DOT_GAIN_GAMMA`).
+ */
 function ditherToBlack(rgba: ArrayLike<number>, width: number, height: number): Uint8Array {
   const grey = new Float32Array(width * height);
   for (let index = 0; index < grey.length; index++) {
     const offset = index * 4;
-    grey[index] = (299 * rgba[offset]! + 587 * rgba[offset + 1]! + 114 * rgba[offset + 2]!) / 1000;
+    const luma = (299 * rgba[offset]! + 587 * rgba[offset + 1]! + 114 * rgba[offset + 2]!) / 1000;
+    grey[index] = 255 * (luma / 255) ** DOT_GAIN_GAMMA;
   }
 
   const black = new Uint8Array(width * height);
